@@ -3,6 +3,29 @@ const flags = @import("flags");
 const minisign = @import("minisign.zig");
 const folders = @import("known_folders");
 const json = std.json;
+const log = std.log;
+
+pub const std_options = std.Options{ .logFn = zvmLog };
+
+fn zvmLog(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = level;
+    _ = scope;
+
+    const stderr = std.io.getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+
+    writer.print(format, args) catch return;
+    bw.flush() catch return;
+}
 
 const VersionManager = @import("VersionManager.zig");
 
@@ -85,7 +108,7 @@ fn use_version(
     };
     defer version_dir.close();
 
-    std.debug.print("Creating symlink...\n", .{});
+    log.info("Creating symlink...\n", .{});
 
     const symlink_target = try std.fmt.allocPrint(allocator, "../versions/{s}/zig", .{version});
     defer allocator.free(symlink_target);
@@ -97,6 +120,8 @@ fn use_version(
         },
         else => return err,
     };
+
+    log.info("{s} is now the active Zig", .{version});
 }
 
 fn list_versions(allocator: std.mem.Allocator) !void {
@@ -106,12 +131,12 @@ fn list_versions(allocator: std.mem.Allocator) !void {
     var version_count: u32 = 0;
     var iter = zvm_env.versions.iterate();
     while (try iter.next()) |entry| {
-        std.debug.print("    - {s}\n", .{entry.name});
+        log.info("    - {s}\n", .{entry.name});
         version_count += 1;
     }
 
     if (version_count == 0) {
-        std.debug.print("No versions currently installed.", .{});
+        log.info("No versions currently installed.", .{});
     }
 }
 
@@ -124,20 +149,20 @@ fn install(
     var zvm_env = try init_zvm_env(allocator);
     defer zvm_env.deinit();
 
-    if (zvm_env.versions.access(version, .{}) != error.FileNotFound) {
-        std.debug.print("Version {s} already installed\n", .{version});
+    if (std.mem.eql(u8, version, "master") and zvm_env.versions.access(version, .{}) != error.FileNotFound) {
+        log.info("Version {s} already installed\n", .{version});
         return;
     }
 
     const zig_version = version_manager.getVersion(version) catch |err| switch (err) {
         error.NotFound => {
-            std.debug.print("Could not find version {s}.\n", .{version});
+            log.info("Could not find version {s}.\n", .{version});
             return;
         },
         else => return err,
     };
 
-    std.debug.print("Installing zig version {s}\n", .{version});
+    log.info("Installing zig version {s}\n", .{version});
 
     const platform = zig_version.platforms.get("x86_64-linux") orelse return error.PlatformNotFound;
 
@@ -146,7 +171,7 @@ fn install(
     var dot_iter = std.mem.splitSequence(u8, file_name, ".tar");
     const dir_name = dot_iter.next() orelse return error.CouldNotParseAddress;
 
-    std.debug.print("Downloading {s}\n", .{dir_name});
+    log.info("Downloading {s}\n", .{dir_name});
 
     const size = try std.fmt.parseInt(usize, platform.size, 10);
 
@@ -157,7 +182,7 @@ fn install(
     defer allocator.free(minisig);
 
     if (size != tarball.len) {
-        std.debug.print("ERROR: Expected size: {d}, Actual size: {d}", .{ size, tarball.len });
+        log.err("ERROR: Expected size: {d}, Actual size: {d}", .{ size, tarball.len });
         return error.CouldNotVerify;
     }
 
@@ -171,7 +196,7 @@ fn install(
 
     try zvm_env.versions.rename(dir_name, version);
 
-    std.debug.print("Version {s} installed\n", .{version});
+    log.info("Version {s} installed\n", .{version});
 }
 
 const ZvmEnv = struct {
@@ -223,7 +248,7 @@ fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client,
     var response_buf = try std.ArrayList(u8).initCapacity(allocator, init_size);
     errdefer response_buf.deinit();
 
-    std.debug.print("Downloading tarball...\n", .{});
+    log.info("Downloading tarball...\n", .{});
     const response = try client.fetch(.{
         .method = .GET,
         .location = .{ .url = url },
@@ -232,7 +257,7 @@ fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client,
     });
 
     if (response.status != .ok) {
-        std.debug.print("Tarball request return status {}", .{response.status});
+        log.err("ERROR: Tarball request return status {}", .{response.status});
         return error.DownloadError;
     }
 
@@ -246,7 +271,7 @@ fn download_minisig(tarball_url: []const u8, client: *std.http.Client, allocator
     var response_buf = std.ArrayList(u8).init(allocator);
     errdefer response_buf.deinit();
 
-    std.debug.print("Downloading minisig...\n", .{});
+    log.info("Downloading minisig...\n", .{});
     const response = try client.fetch(.{
         .method = .GET,
         .location = .{ .url = url },
@@ -254,7 +279,7 @@ fn download_minisig(tarball_url: []const u8, client: *std.http.Client, allocator
     });
 
     if (response.status != .ok) {
-        std.debug.print("Minisig request return status {}", .{response.status});
+        log.err("ERROR: Minisig request return status {}", .{response.status});
         return error.DownloadError;
     }
 
