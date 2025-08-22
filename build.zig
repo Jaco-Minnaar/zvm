@@ -17,14 +17,15 @@ pub fn build(b: *std.Build) void {
 
     const flags_dep = b.dependency("flags", .{ .target = target, .optimize = optimize });
     const known_folders = b.dependency("known_folders", .{ .target = target, .optimize = optimize });
+
+    exe_mod.addImport("flags", flags_dep.module("flags"));
+    exe_mod.addImport("known_folders", known_folders.module("known-folders"));
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
     const exe = b.addExecutable(.{
         .name = "zvm",
         .root_module = exe_mod,
     });
-    exe.root_module.addImport("flags", flags_dep.module("flags"));
-    exe.root_module.addImport("known_folders", known_folders.module("known-folders"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

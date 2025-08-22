@@ -7,6 +7,10 @@ const log = std.log;
 
 pub const std_options = std.Options{ .logFn = zvmLog };
 
+var log_buf: [1024]u8 = undefined;
+var stderr_writer = std.fs.File.stderr().writer(&log_buf);
+const stderr = &stderr_writer.interface;
+
 fn zvmLog(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -16,15 +20,11 @@ fn zvmLog(
     _ = level;
     _ = scope;
 
-    const stderr = std.io.getStdErr().writer();
-    var bw = std.io.bufferedWriter(stderr);
-    const writer = bw.writer();
-
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
 
-    writer.print(format, args) catch return;
-    bw.flush() catch return;
+    stderr.print(format ++ "\n", args) catch return;
+    stderr.flush() catch return;
 }
 
 const VersionManager = @import("VersionManager.zig");
@@ -108,7 +108,7 @@ fn use_version(
     };
     defer version_dir.close();
 
-    log.info("Creating symlink...\n", .{});
+    log.info("Creating symlink...", .{});
 
     const symlink_target = try std.fmt.allocPrint(allocator, "../versions/{s}/zig", .{version});
     defer allocator.free(symlink_target);
@@ -131,7 +131,7 @@ fn list_versions(allocator: std.mem.Allocator) !void {
     var version_count: u32 = 0;
     var iter = zvm_env.versions.iterate();
     while (try iter.next()) |entry| {
-        log.info("    - {s}\n", .{entry.name});
+        log.info("    - {s}", .{entry.name});
         version_count += 1;
     }
 
@@ -149,20 +149,20 @@ fn install(
     var zvm_env = try init_zvm_env(allocator);
     defer zvm_env.deinit();
 
-    if (std.mem.eql(u8, version, "master") and zvm_env.versions.access(version, .{}) != error.FileNotFound) {
-        log.info("Version {s} already installed\n", .{version});
+    if (!std.mem.eql(u8, version, "master") and zvm_env.versions.access(version, .{}) != error.FileNotFound) {
+        log.info("Version {s} already installed", .{version});
         return;
     }
 
     const zig_version = version_manager.getVersion(version) catch |err| switch (err) {
         error.NotFound => {
-            log.info("Could not find version {s}.\n", .{version});
+            log.info("Could not find version {s}.", .{version});
             return;
         },
         else => return err,
     };
 
-    log.info("Installing zig version {s}\n", .{version});
+    log.info("Found information for Zig version {s}", .{version});
 
     const platform = zig_version.platforms.get("x86_64-linux") orelse return error.PlatformNotFound;
 
@@ -171,15 +171,17 @@ fn install(
     var dot_iter = std.mem.splitSequence(u8, file_name, ".tar");
     const dir_name = dot_iter.next() orelse return error.CouldNotParseAddress;
 
-    log.info("Downloading {s}\n", .{dir_name});
+    log.info("Downloading {s}", .{dir_name});
 
     const size = try std.fmt.parseInt(usize, platform.size, 10);
-
-    const tarball = try download_tarball(platform.tarball, size, client, allocator);
-    defer allocator.free(tarball);
+    log.debug("expected size: {d}", .{size});
 
     const minisig = try download_minisig(platform.tarball, client, allocator);
     defer allocator.free(minisig);
+
+    const progress = std.Progress.start(.{});
+    const tarball = try download_tarball(platform.tarball, size, client, allocator, progress);
+    defer allocator.free(tarball);
 
     if (size != tarball.len) {
         log.err("ERROR: Expected size: {d}, Actual size: {d}", .{ size, tarball.len });
@@ -192,11 +194,13 @@ fn install(
     var decompress_stream = try std.compress.xz.decompress(allocator, fixed_buf.reader());
     defer decompress_stream.deinit();
 
-    try std.tar.pipeToFileSystem(zvm_env.versions, decompress_stream.reader(), .{});
+    var decompress_buf: [4096]u8 = undefined;
+    var adapter = decompress_stream.reader().adaptToNewApi(&decompress_buf);
+    try std.tar.pipeToFileSystem(zvm_env.versions, &adapter.new_interface, .{});
 
     try zvm_env.versions.rename(dir_name, version);
 
-    log.info("Version {s} installed\n", .{version});
+    log.info("Version {s} installed", .{version});
 }
 
 const ZvmEnv = struct {
@@ -244,44 +248,72 @@ fn verify(tarball: []const u8, minisig: []const u8, allocator: std.mem.Allocator
     try minisign.verify(arena.allocator(), &.{pk}, tarball, sig, null);
 }
 
-fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client, allocator: std.mem.Allocator) ![]const u8 {
+fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client, allocator: std.mem.Allocator, progress: std.Progress.Node) ![]const u8 {
     var response_buf = try std.ArrayList(u8).initCapacity(allocator, init_size);
-    errdefer response_buf.deinit();
+    errdefer response_buf.deinit(allocator);
 
-    log.info("Downloading tarball...\n", .{});
-    const response = try client.fetch(.{
-        .method = .GET,
-        .location = .{ .url = url },
-        .response_storage = .{ .dynamic = &response_buf },
-        .max_append_size = 1024 * 1024 * 1024,
-    });
+    log.info("Downloading tarball from {s}", .{url});
 
-    if (response.status != .ok) {
-        log.err("ERROR: Tarball request return status {}", .{response.status});
+    var req = try client.request(.GET, try .parse(url), .{});
+    defer req.deinit();
+
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
+
+    if (response.head.status != .ok) {
+        log.err("ERROR: Tarball request returned status {}", .{response.head.status});
         return error.DownloadError;
     }
 
-    return try response_buf.toOwnedSlice();
+    var reader_buffer: [4096]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    const body_reader = response.readerDecompressing(
+        &reader_buffer,
+        &decompress,
+        &decompress_buffer,
+    );
+
+    const progress_node = progress.start("tarball download", init_size);
+
+    var current_read: [1024]u8 = undefined;
+    var bytes_read = try body_reader.readSliceShort(&current_read);
+    while (bytes_read == current_read.len) : (bytes_read = try body_reader.readSliceShort(&current_read)) {
+        try response_buf.appendSlice(allocator, current_read[0..bytes_read]);
+
+        for (0..bytes_read) |_| progress_node.completeOne();
+    }
+    try response_buf.appendSlice(allocator, current_read[0..bytes_read]);
+    for (0..bytes_read) |_| progress_node.completeOne();
+
+    progress_node.end();
+
+    return try response_buf.toOwnedSlice(allocator);
 }
 
 fn download_minisig(tarball_url: []const u8, client: *std.http.Client, allocator: std.mem.Allocator) ![]const u8 {
     const url = try std.fmt.allocPrint(allocator, "{s}.minisig", .{tarball_url});
     defer allocator.free(url);
 
-    var response_buf = std.ArrayList(u8).init(allocator);
-    errdefer response_buf.deinit();
+    log.info("Downloading minisig from {s}", .{url});
 
-    log.info("Downloading minisig...\n", .{});
-    const response = try client.fetch(.{
-        .method = .GET,
-        .location = .{ .url = url },
-        .response_storage = .{ .dynamic = &response_buf },
-    });
+    var req = try client.request(.GET, try .parse(url), .{});
+    defer req.deinit();
 
-    if (response.status != .ok) {
-        log.err("ERROR: Minisig request return status {}", .{response.status});
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
+
+    if (response.head.status != .ok) {
+        log.err("ERROR: Minisig request returned status {}", .{response.head.status});
         return error.DownloadError;
     }
 
-    return try response_buf.toOwnedSlice();
+    const len = if (response.head.content_length) |l| l else return error.NoContentLength;
+
+    var reader_buffer: [4096]u8 = undefined;
+    const body_reader = response.reader(&reader_buffer);
+
+    const response_buf = try body_reader.readAlloc(allocator, len);
+
+    return response_buf;
 }

@@ -83,18 +83,35 @@ pub fn printVersions(self: *Self) !void {
 fn refreshVersions(self: *Self) !void {
     self.deinit_versions();
 
-    var response_buf = std.ArrayList(u8).init(self.allocator);
-    defer response_buf.deinit();
+    var req = try self.client.request(.GET, try .parse("https://ziglang.org/download/index.json"), .{});
+    defer req.deinit();
 
-    const response = try self.client.fetch(.{
-        .method = .GET,
-        .location = .{ .url = "https://pkg.machengine.org/zig/index.json" },
-        .response_storage = .{ .dynamic = &response_buf },
-    });
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
 
-    if (response.status != .ok) {
-        std.log.err("Request failed with code {}", .{response.status});
+    if (response.head.status != .ok) {
+        std.log.err("Request failed with code {}", .{response.head.status});
+        return error.RequestFailed;
     }
+
+    var reader_buffer: [1024]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    const body_reader = response.readerDecompressing(
+        &reader_buffer,
+        &decompress,
+        &decompress_buffer,
+    );
+
+    var response_buf = std.ArrayList(u8).empty;
+    defer response_buf.deinit(self.allocator);
+
+    var current_read: [1024]u8 = undefined;
+    var bytes_read = try body_reader.readSliceShort(&current_read);
+    while (bytes_read == current_read.len) : (bytes_read = try body_reader.readSliceShort(&current_read)) {
+        try response_buf.appendSlice(self.allocator, current_read[0..bytes_read]);
+    }
+    try response_buf.appendSlice(self.allocator, current_read[0..bytes_read]);
 
     const parsed = try std.json.parseFromSlice(
         std.json.ArrayHashMap(std.json.Value),

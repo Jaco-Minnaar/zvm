@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.14.1",
+    .minimum_zig_version = "0.15.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -37,8 +37,8 @@
     // internet connectivity.
     .dependencies = .{
         .flags = .{
-            .url = "https://github.com/joegm/flags/archive/1dc0af323f7f3ffdf81d575c762ed5584f044713.tar.gz",
-            .hash = "flags-0.10.0-a_9h3ltuAAD218bNoRstScMFf5TWCj_-6CuMa-OZ8Oie",
+            .url = "git+https://github.com/Jaco-Minnaar/flags#5ea3bc73db09207ae0f658c3f3e5b587053a064a",
+            .hash = "flags-0.10.0-a_9h3kRvAACJ6wkC3dKM_ypX4eOVicl6RKosiSDEvJMd",
         },
         .known_folders = .{
             .url = "https://github.com/ziglibs/known-folders/archive/ab5cf5feb936fa3b72c95d3ad0c0c67791937ba1.tar.gz",
