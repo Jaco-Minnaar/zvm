@@ -37,8 +37,8 @@
     // internet connectivity.
     .dependencies = .{
         .flags = .{
-            .url = "git+https://github.com/Jaco-Minnaar/flags#5ea3bc73db09207ae0f658c3f3e5b587053a064a",
-            .hash = "flags-0.10.0-a_9h3kRvAACJ6wkC3dKM_ypX4eOVicl6RKosiSDEvJMd",
+            .url = "git+https://github.com/Jaco-Minnaar/flags#d653b9c506e616cb2884785092e5521bce23b75e",
+            .hash = "flags-0.10.0-a_9h3gVxAACCszl_tC-WznsMWb86ACekZDaEm8ZuaTIi",
         },
         .known_folders = .{
             .url = "https://github.com/ziglibs/known-folders/archive/ab5cf5feb936fa3b72c95d3ad0c0c67791937ba1.tar.gz",

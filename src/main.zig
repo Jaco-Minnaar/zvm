@@ -2,6 +2,7 @@ const std = @import("std");
 const flags = @import("flags");
 const minisign = @import("minisign.zig");
 const folders = @import("known_folders");
+const Progress = @import("Progress.zig");
 const json = std.json;
 const log = std.log;
 
@@ -49,6 +50,11 @@ const Cli = struct {
                 version: []const u8,
             },
         },
+        remove: struct {
+            positional: struct {
+                version: []const u8,
+            },
+        },
     },
 };
 
@@ -61,7 +67,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const cli = flags.parse(args, "zvm", Cli, .{});
+    const cli = try flags.parse(args, "zvm", Cli, .{});
 
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -87,7 +93,26 @@ pub fn main() !void {
             &client,
             allocator,
         ),
+        .remove => |cmd| try remove(cmd.positional.version, allocator),
     }
+}
+
+fn remove(version: []const u8, allocator: std.mem.Allocator) !void {
+    var zvm_env = try init_zvm_env(allocator);
+    defer zvm_env.deinit();
+
+    var version_dir = zvm_env.versions.openDir(version, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            log.info("Version {s} not installed.", .{version});
+            return;
+        },
+        else => return err,
+    };
+    version_dir.close();
+
+    try zvm_env.versions.deleteTree(version);
+
+    log.info("Version {s} removed successfully.", .{version});
 }
 
 fn use_version(
@@ -179,7 +204,7 @@ fn install(
     const minisig = try download_minisig(platform.tarball, client, allocator);
     defer allocator.free(minisig);
 
-    const progress = std.Progress.start(.{});
+    const progress = Progress.start(.{});
     const tarball = try download_tarball(platform.tarball, size, client, allocator, progress);
     defer allocator.free(tarball);
 
@@ -190,11 +215,15 @@ fn install(
 
     try verify(tarball, minisig, allocator);
 
-    var fixed_buf = std.io.fixedBufferStream(tarball);
-    var decompress_stream = try std.compress.xz.decompress(allocator, fixed_buf.reader());
+    log.info("tarball verified", .{});
+
+    log.info("unpacking tarball", .{});
+    var fixed_reader = std.io.Reader.fixed(tarball);
+    const fixed_buf = fixed_reader.adaptToOldInterface();
+    var decompress_stream = try std.compress.xz.decompress(allocator, fixed_buf);
     defer decompress_stream.deinit();
 
-    var decompress_buf: [4096]u8 = undefined;
+    var decompress_buf: [4096 * 1024]u8 = undefined;
     var adapter = decompress_stream.reader().adaptToNewApi(&decompress_buf);
     try std.tar.pipeToFileSystem(zvm_env.versions, &adapter.new_interface, .{});
 
@@ -248,7 +277,7 @@ fn verify(tarball: []const u8, minisig: []const u8, allocator: std.mem.Allocator
     try minisign.verify(arena.allocator(), &.{pk}, tarball, sig, null);
 }
 
-fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client, allocator: std.mem.Allocator, progress: std.Progress.Node) ![]const u8 {
+fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client, allocator: std.mem.Allocator, progress: Progress.Node) ![]const u8 {
     var response_buf = try std.ArrayList(u8).initCapacity(allocator, init_size);
     errdefer response_buf.deinit(allocator);
 
@@ -281,7 +310,7 @@ fn download_tarball(url: []const u8, init_size: usize, client: *std.http.Client,
     while (bytes_read == current_read.len) : (bytes_read = try body_reader.readSliceShort(&current_read)) {
         try response_buf.appendSlice(allocator, current_read[0..bytes_read]);
 
-        for (0..bytes_read) |_| progress_node.completeOne();
+        progress_node.completeMany(bytes_read);
     }
     try response_buf.appendSlice(allocator, current_read[0..bytes_read]);
     for (0..bytes_read) |_| progress_node.completeOne();
